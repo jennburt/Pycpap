@@ -1,0 +1,94 @@
+    model {
+    # Set Priors: NOTE: either R or dbar should probably be fixed 
+    Dispers ~ dgamma(1.1,0.1)   # over-dispersion parameter (for Neg Binom counts)
+    # Mean per-capita death rate for small urchins - fitted 
+    dbar ~ dunif(.001,10) # 
+    # Mean 'Apparent Annual Recruitment' to smallest size class 
+    # R ~ dgamma(1.1,0.01) # vague prior OR make this a constant
+    Pobs ~ dbeta(1.5,1.5) # vague prior, prob of counting small szclass urchins
+    # Mortality rate params for med and large: computed as a fraction
+    #  of the rate for small (so that mortality at each site correlated accross size classes)
+    beta1 ~ dbeta(1, 2)
+    beta2 ~ dbeta(1, 2)
+    # Predator-specific mortality rates for pycno and otters (flat priors)
+    #  (1 = rate for Medium, 2 = rate for Large, and optionally 3 = rate for small)
+    alphaP[1] ~ dunif(0.0001,5)
+    alphaP[2] ~ dunif(0.0001,5)
+    alphaP[3] ~ dunif(0.0001,5)
+    alphaO[1] ~ dunif(0.0001,5)
+    alphaO[2] ~ dunif(0.0001,5)
+    # alphaO[3] ~ dunif(0.001,5)
+    # Variance params: variance among sites/years in mortality rates
+    sigS ~ dunif(0.001,5)
+    tauS <- pow(sigS,-2)
+    sigY ~ dunif(0.001,5)
+    tauY <- pow(sigY,-2)
+    # Compute hidden state dynamics at each site  
+    for (s in 1:NS){
+      # Site-specific mortality (leads to variation in equilibrial abundance)
+      d[s] ~ dnorm((dbar),tauS) T(0,)
+      b1[s] <- d[s]*beta1
+      b2[s] <- d[s]*beta2
+      # Initialize site abundances at year 1 
+      NsEq[s,1] <- N0[s,1]*(1/Pobs)
+      NmEq[s,1] <- N0[s,2]
+      NlEq[s,1] <- N0[s,3]
+      # Cycle through initialization years to reach equilibrium abundance for each size class
+      for (t in 2:(NEQ-1)){
+        NsEqP[s,t] <- NsEq[s,t-1] + R - g1*NsEq[s,t-1] 
+        NmEqP[s,t] <- NmEq[s,t-1] + g1*NsEq[s,t-1] - g2*NmEq[s,t-1] 
+        NlEqP[s,t] <- NlEq[s,t-1] + g2*NmEq[s,t-1]
+        NsEq[s,t] <- NsEqP[s,t]*(exp(-1*exp(-5 + d[s] + alphaP[3]*P[s,1] )))
+        NmEq[s,t] <- NmEqP[s,t]*(exp(-1*exp(-5 + b1[s] + alphaP[1]*P[s,1] + alphaO[1]*O[s,1] )))
+        NlEq[s,t] <- NlEqP[s,t]*(exp(-1*exp(-5 + b2[s] + alphaP[2]*P[s,1] + alphaO[2]*O[s,1] )))
+      }
+	  # Now add stochastic variaiton to year 1
+      eps0[s,1] ~ dnorm(0,tauY)
+      eps1[s,1] ~ dnorm(0,tauY)
+      eps2[s,1] ~ dnorm(0,tauY)
+      for (t in NEQ:NEQ){
+        NsEqP[s,t] <- NsEq[s,t-1] + R - g1*NsEq[s,t-1] 
+        NmEqP[s,t] <- NmEq[s,t-1] + g1*NsEq[s,t-1] - g2*NmEq[s,t-1] 
+        NlEqP[s,t] <- NlEq[s,t-1] + g2*NmEq[s,t-1]
+        NsEq[s,t] <- NsEqP[s,t]*(exp(-1*exp(-5 + eps0[s,1] + d[s] + alphaP[3]*P[s,1])))
+        NmEq[s,t] <- NmEqP[s,t]*(exp(-1*exp(-5 + eps1[s,1] + b1[s] + alphaP[1]*P[s,1] + alphaO[1]*O[s,1] )))
+        NlEq[s,t] <- NlEqP[s,t]*(exp(-1*exp(-5 + eps2[s,1] + b2[s] + alphaP[2]*P[s,1] + alphaO[2]*O[s,1] )))
+      }
+	  # Year 1 abundances (equilibrium with stochasticity)
+      Ns[s,1] <- NsEq[s,NEQ] 	
+      Nm[s,1] <- NmEq[s,NEQ] 
+      Nl[s,1] <- NlEq[s,NEQ] 
+      # Now cycle through remaining 'real' Years (allow for year to year stochasticity)
+      for (t in 2:NY){
+        eps0[s,t] ~ dnorm(0,tauY)
+        eps1[s,t] ~ dnorm(0,tauY)
+        eps2[s,t] ~ dnorm(0,tauY)
+        NsP[s,t] <- Ns[s,t-1] + R - g1*Ns[s,t-1] 
+        NmP[s,t] <- Nm[s,t-1] + g1*Ns[s,t-1] - g2*Nm[s,t-1] 
+        NlP[s,t] <- Nl[s,t-1] + g2*Nm[s,t-1]
+        Ns[s,t] <- NsP[s,t]*(exp(-1*exp(-5 + eps0[s,t] + d[s] + alphaP[3]*P[s,t])))
+        Nm[s,t] <- NmP[s,t]*(exp(-1*exp(-5 + eps1[s,t] + b1[s] + alphaP[1]*P[s,t] + alphaO[1]*O[s,t] )))
+        Nl[s,t] <- NlP[s,t]*(exp(-1*exp(-5 + eps2[s,t] + b2[s] + alphaP[2]*P[s,t] + alphaO[2]*O[s,t] )))
+      }
+    }
+    # Now determine stochastic nodes = measurements at each Quadrat, by size class
+    for (i in 1:NObs){
+	  # Mean expected abundance 
+      mu[i,1] <- Ns[S[i],Y[i]]*Pobs
+      mu[i,2] <- Nm[S[i],Y[i]]
+      mu[i,3] <- Nl[S[i],Y[i]]
+      # Scale Parameter for negative binomial
+      p[i,1] <- Dispers/(Dispers+mu[i,1]) 
+      p[i,2] <- Dispers/(Dispers+mu[i,2]) 
+      p[i,3] <- Dispers/(Dispers+mu[i,3]) 
+      # Observed Nodes: counts of small, medium and large urchins (with over dispersion):
+      obs[i,1] ~ dnegbin(p[i,1],Dispers)
+      obs[i,2] ~ dnegbin(p[i,2],Dispers)
+      obs[i,3] ~ dnegbin(p[i,3],Dispers)
+      # Calculate summed loglikelihood of observed values (for WAIC calcs)
+      loglik1[i] <- logdensity.negbin(obs[i,1],p[i,1],Dispers)
+      loglik2[i] <- logdensity.negbin(obs[i,2],p[i,2],Dispers)
+      loglik3[i] <- logdensity.negbin(obs[i,3],p[i,3],Dispers)
+      loglikS[i] <- loglik1[i] + loglik2[i] + loglik3[i]
+    }
+  }
