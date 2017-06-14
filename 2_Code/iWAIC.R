@@ -17,7 +17,7 @@ library(plyr)
 library(dplyr)
 library(tidyr)
 library(reshape2)
-
+library(parallel)
 # The calculation of waic (integrated or not)  Returns lppd, p_waic_1, p_waic_2, and waic, which we define
 # as 2*(lppd - p_waic_2), as recommmended in BDA
 WAIC_fun <- function (lp_mat){
@@ -34,15 +34,18 @@ data <- DatQ%>%
   melt(id.vars= c("time","site","Q"),value.name= "obs",variable.name="class")%>%
   mutate(time= time-min(time)+1)
 
-iWIAC <- function(jags_posterior,data,n_cores,n_reps){
+mcmc <- out$mcmc
+
+iWAIC <- function(data,mcmc,n_cores,n_reps){
+  
   char_list_N<- c("NsP","NmP","NlP")
   char_list_g <- c("gamma_s","gamma_m","gamma_l")
   char_list_s <- c("sigS","sigY","Dispers")
-  index_N <- grep(paste(char_list_N,collapse= "|"),dimnames(out$mcmc[[1]])[[2]])
-  index_g <- grep(paste(char_list_g,collapse= "|"),dimnames(out$mcmc[[1]])[[2]])
-  index_s <- grep(paste(char_list_s,collapse= "|"),dimnames(out$mcmc[[1]])[[2]])
+  index_N <- grep(paste(char_list_N,collapse= "|"),dimnames(mcmc[[1]])[[2]])
+  index_g <- grep(paste(char_list_g,collapse= "|"),dimnames(mcmc[[1]])[[2]])
+  index_s <- grep(paste(char_list_s,collapse= "|"),dimnames(mcmc[[1]])[[2]])
   
-  post <- ldply(out$mcmc)%>%
+  post <- ldply(mcmc)%>%
     add_rownames(var= "iter")%>%
     mutate(iter= as.numeric(as.character(iter)))
   
@@ -53,22 +56,35 @@ iWIAC <- function(jags_posterior,data,n_cores,n_reps){
   
   post_N <- post[,c(1,index_N+1)]%>%
     melt(id.vars= "iter",value.name= "N")%>%
-    separate(variable,into= c("class","time","site"),sep= c("\\[|\\,|\\]"))%>%
+    separate(variable,into= c("class","site","time"),sep= c("\\[|\\,|\\]"),
+             extra = "drop", fill = "right")%>%
     mutate(class = gsub("N|P","",class))
   
   post_gamma <- post[,c(1,index_g+1)]%>%
     melt(id.vars= "iter",value.name= "gamma")%>%
-    separate(variable,into= c("class","time","site"),sep= c("\\[|\\,|\\]"))%>%
+    separate(variable,into= c("class","site","time"),sep= c("\\[|\\,|\\]"),
+             ,extra = "drop", fill = "right")%>%
     mutate(class = gsub("gamma_","",class))
   
   post_agg <- join(post_N,post_gamma)%>%
-    right_join(post[,c(1,index_s+1)])
+    right_join(post[,c(1,index_s+1)])%>%
+    mutate(iter= as.numeric(iter),
+           time= as.numeric(time),
+           site= as.numeric(site))
+  
+  n_times = length(unique(post_agg$time))
+  n_classes = length(unique(post_agg$class))
+  n_sites = length(unique(post_agg$site))
+  n_iter = length(unique(post_agg$iter))
+  
   ### loop to calculate random latent estimates 
   ### and calculate log-probability given parameter estimates
   ### and prior latent estimates (forward projection only... 
   ### ... for now, could do a VPA type calulation too)
   ### list of repetitions over which to integrate the likelihood
-  iter_list <- as.list(1:n_reps)
+  
+  iter_list <- as.list(1:n_iter)
+  
   ### function to paralellize the likelihood integration
   lp_integrator <- function(x){
     lp_vec <- array(0,dim= c(nrow(data),1))
@@ -76,18 +92,26 @@ iWIAC <- function(jags_posterior,data,n_cores,n_reps){
         for(j in 1:n_sites){
           for(k in 1:n_classes){
             index <- with(data,time==i&site==j&class==unique(class)[k])
-            with(subset(post_agg,time==i&site==j&class==unique(class)[k]&iter==x),
-            lp <- sapply(rnorm(n_reps,0,1),function(z) dnbinom(x=data[index,"obs"],
-              mu=N*exp(-exp(gamma+z*sigS)),
+            lp <- with(subset(post_agg,time==i&site==j&class==unique(class)[k]&iter==x),
+            sapply(rnorm(n_reps,0,1),function(z) dnbinom(x=data[index,"obs"],
+              mu=N*exp(-gamma*exp(z*sigS)),
               size=Dispers)))
-            lp_mat[index] <- apply(lp,1,function(x)log(mean(exp(x))))        
+            lp_vec[index] <- apply(lp,1,function(x)log(mean(exp(x))))        
         }
       }
     }
+    return(lp_vec)
   }
   ### generate the integrated likelihood over parallel threads
-  lp_list <- mclapply(iter_list,lp_integrator,mc.cores= n_cores,mc.preschedule= FALSE)
+  lp_list <- mclapply(iter_list,lp_integrator,
+                      mc.cores= n_cores,mc.preschedule = FALSE)
+  
+  lp_array <- do.call(cbind,lp_list)
+  
   ### calculate iWAIC
-  iWAIC <- WAIC(laply(lp_list))
+  iWAIC <- WAIC(lp_array)
   return(iWAIC)
 }
+
+
+mcmc_WAIC <- iWAIC(data,mcmc,n_cores=10,n_reps=100)
